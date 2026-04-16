@@ -3,7 +3,7 @@
  * Plugin Name: ChiroBasix Copilot - MarkUp Bridge
  * Description: Allows copilot.chirobasix.com to embed this site in an iframe and provides
  *              a postMessage bridge for the MarkUp feedback tool (scroll tracking, navigation).
- * Version: 2.1.0
+ * Version: 2.2.0
  * Author: ChiroBasix
  * GitHub Repo: chirobasix/chirobasix-copilot-markup-tool
  */
@@ -179,11 +179,120 @@ add_action('send_headers', function () {
 
 // ─── MarkUp Bridge Script ────────────────────────────────────────────────────
 
+// ─── Suppress Popups in Copilot iframe ─────────────────────────────────────
+
+add_action('wp_head', function () {
+    // Only inject when loaded inside the Copilot iframe
+    if ( empty( $_SERVER['HTTP_SEC_FETCH_DEST'] ) || $_SERVER['HTTP_SEC_FETCH_DEST'] !== 'iframe' ) {
+        // Fallback: check referer
+        $referer = $_SERVER['HTTP_REFERER'] ?? '';
+        if ( strpos( $referer, 'copilot.chirobasix.com' ) === false && strpos( $referer, 'localhost' ) === false ) {
+            return;
+        }
+    }
+    ?>
+    <style id="cbx-copilot-popup-suppress">
+    /* Common WordPress popup / modal selectors */
+    .elementor-popup-modal,
+    .elementor-location-popup,
+    [data-elementor-type="popup"],
+    .jet-popup,
+    .pum-overlay,
+    .pum-container,
+    .sg-popup-overlay,
+    .hustle-popup,
+    .hustle-modal,
+    .omapi-holder,
+    .optinmonster,
+    #om-holder,
+    .sumo-overlay,
+    .icegram,
+    .nf-modal-bg,
+    .ninja-forms-modal,
+    .wpforms-container-full.wpforms-popup,
+    .cookie-notice,
+    #cookie-notice,
+    #cookie-law-info-bar,
+    .cc-window,
+    .cky-consent-container,
+    #CybotCookiebotDialog,
+    .moove-gdpr-info-bar-container,
+    .gdpr-cookie-banner,
+    [class*="cookie-consent"],
+    [class*="cookie-banner"],
+    [id*="cookie-popup"],
+    .tawk-min-container,
+    #tidio-chat,
+    .fb_dialog,
+    .drift-frame-controller,
+    .intercom-lightweight-app,
+    .crisp-client,
+    [class*="chat-widget"],
+    [id*="chat-widget"] {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+    }
+
+    /* Hide overlay backdrops */
+    .pum-overlay,
+    .sg-popup-overlay,
+    .elementor-popup-modal ~ .dialog-lightbox-overlay,
+    .modal-backdrop,
+    [class*="popup-overlay"] {
+        display: none !important;
+    }
+
+    /* Prevent body scroll lock from popups */
+    body.pum-open,
+    body.elementor-popup-modal-open,
+    body.modal-open,
+    body.no-scroll,
+    body.noscroll,
+    body.overflow-hidden {
+        overflow: auto !important;
+        position: static !important;
+    }
+    </style>
+    <?php
+});
+
 add_action('wp_footer', function () {
     ?>
     <script>
     (function() {
         if (window.self === window.top) return; // Not in an iframe, skip
+
+        // ─── Popup suppression (JS-created popups) ─────────────────
+        // Watch for dynamically added popup elements and hide them
+        var popupObserver = new MutationObserver(function(mutations) {
+            mutations.forEach(function(m) {
+                m.addedNodes.forEach(function(node) {
+                    if (node.nodeType !== 1) return;
+                    var el = node;
+                    var cls = (el.className || '').toString().toLowerCase();
+                    var id = (el.id || '').toLowerCase();
+                    var isPopup =
+                        cls.indexOf('popup') !== -1 ||
+                        cls.indexOf('modal') !== -1 ||
+                        cls.indexOf('overlay') !== -1 ||
+                        cls.indexOf('cookie') !== -1 ||
+                        cls.indexOf('chat-widget') !== -1 ||
+                        cls.indexOf('optinmonster') !== -1 ||
+                        cls.indexOf('hustle') !== -1 ||
+                        id.indexOf('popup') !== -1 ||
+                        id.indexOf('modal') !== -1 ||
+                        id.indexOf('cookie') !== -1 ||
+                        el.getAttribute('data-elementor-type') === 'popup';
+                    if (isPopup) {
+                        el.style.display = 'none';
+                        el.style.visibility = 'hidden';
+                    }
+                });
+            });
+        });
+        popupObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
 
         function reportState() {
             window.parent.postMessage({
