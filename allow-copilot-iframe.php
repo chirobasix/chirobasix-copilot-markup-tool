@@ -3,7 +3,7 @@
  * Plugin Name: ChiroBasix Copilot - MarkUp Bridge
  * Description: Allows copilot.chirobasix.com to embed this site in an iframe and provides
  *              a postMessage bridge for the MarkUp feedback tool (scroll tracking, navigation).
- * Version: 2.2.0
+ * Version: 2.3.0
  * Author: ChiroBasix
  * GitHub Repo: chirobasix/chirobasix-copilot-markup-tool
  */
@@ -294,11 +294,18 @@ add_action('wp_footer', function () {
         });
         popupObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
 
+        function getScrollX() {
+            return window.scrollX || window.pageXOffset || document.documentElement.scrollLeft || document.body.scrollLeft || 0;
+        }
+        function getScrollY() {
+            return window.scrollY || window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
+        }
+
         function reportState() {
             window.parent.postMessage({
                 type: 'markup-scroll',
-                scrollX: window.scrollX,
-                scrollY: window.scrollY,
+                scrollX: getScrollX(),
+                scrollY: getScrollY(),
                 pageWidth: document.documentElement.scrollWidth,
                 pageHeight: document.documentElement.scrollHeight,
                 viewportWidth: window.innerWidth,
@@ -306,6 +313,61 @@ add_action('wp_footer', function () {
                 currentUrl: window.location.href,
                 timestamp: Date.now()
             }, '*');
+        }
+
+        // ─── html2canvas loader (lazy, on first capture request) ───
+        var html2canvasPromise = null;
+        function loadHtml2Canvas() {
+            if (html2canvasPromise) return html2canvasPromise;
+            html2canvasPromise = new Promise(function(resolve, reject) {
+                if (window.html2canvas) return resolve(window.html2canvas);
+                var s = document.createElement('script');
+                s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+                s.onload = function() { resolve(window.html2canvas); };
+                s.onerror = reject;
+                document.head.appendChild(s);
+            });
+            return html2canvasPromise;
+        }
+
+        function captureScreenshot(opts) {
+            var size = opts.size || 400;
+            var pageX = opts.pageX || 0;
+            var pageY = opts.pageY || 0;
+            var requestId = opts.requestId || null;
+
+            var x = Math.max(0, pageX - size / 2);
+            var y = Math.max(0, pageY - size / 2);
+
+            return loadHtml2Canvas().then(function(html2canvas) {
+                return html2canvas(document.body, {
+                    x: x,
+                    y: y,
+                    width: size,
+                    height: size,
+                    useCORS: true,
+                    allowTaint: true,
+                    logging: false,
+                    backgroundColor: '#ffffff',
+                    scale: 1
+                });
+            }).then(function(canvas) {
+                var dataUrl = canvas.toDataURL('image/png');
+                window.parent.postMessage({
+                    type: 'markup-screenshot-result',
+                    requestId: requestId,
+                    dataUrl: dataUrl,
+                    pageX: pageX,
+                    pageY: pageY,
+                    size: size
+                }, '*');
+            }).catch(function(err) {
+                window.parent.postMessage({
+                    type: 'markup-screenshot-result',
+                    requestId: requestId,
+                    error: String(err && err.message || err)
+                }, '*');
+            });
         }
 
         // Listen for commands from parent
@@ -324,6 +386,8 @@ add_action('wp_footer', function () {
                 document.body.style.cursor = e.data.enabled ? 'crosshair' : '';
             } else if (e.data && e.data.type === 'markup-clear-selection') {
                 window.getSelection().removeAllRanges();
+            } else if (e.data && e.data.type === 'markup-capture-screenshot') {
+                captureScreenshot(e.data);
             }
         });
 
@@ -378,7 +442,9 @@ add_action('wp_footer', function () {
             }, '*');
         });
 
-        // Report on scroll — continuous rAF loop while scrolling for smooth pin tracking
+        // Report on EVERY scroll event — browsers throttle to ~60fps so this is safe.
+        // Also keep a rAF loop running briefly to catch momentum/inertial scroll on
+        // touch devices and during smooth-scroll animations.
         var scrolling = false;
         var scrollTimer = null;
         function scrollLoop() {
@@ -386,18 +452,23 @@ add_action('wp_footer', function () {
             reportState();
             requestAnimationFrame(scrollLoop);
         }
-        window.addEventListener('scroll', function() {
+        function onScroll() {
+            reportState(); // fire immediately on every scroll event
             if (!scrolling) {
                 scrolling = true;
-                reportState(); // immediate first report
                 requestAnimationFrame(scrollLoop);
             }
             clearTimeout(scrollTimer);
             scrollTimer = setTimeout(function() {
                 scrolling = false;
-                reportState(); // final report when scroll stops
-            }, 150);
-        }, { passive: true });
+                reportState();
+            }, 200);
+        }
+        window.addEventListener('scroll', onScroll, { passive: true, capture: true });
+        // Some plugins scroll the documentElement directly — listen there too
+        document.addEventListener('scroll', onScroll, { passive: true, capture: true });
+        window.addEventListener('wheel', onScroll, { passive: true });
+        window.addEventListener('touchmove', onScroll, { passive: true });
 
         // Report on resize
         window.addEventListener('resize', reportState);
