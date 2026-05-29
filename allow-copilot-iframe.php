@@ -3,7 +3,7 @@
  * Plugin Name: ChiroBasix Copilot - MarkUp Bridge
  * Description: Allows copilot.chirobasix.com to embed this site in an iframe and provides
  *              a postMessage bridge for the MarkUp feedback tool (scroll tracking, navigation).
- * Version: 2.4.0
+ * Version: 2.5.0
  * Author: ChiroBasix
  * GitHub Repo: chirobasix/chirobasix-copilot-markup-tool
  */
@@ -330,50 +330,107 @@ add_action('wp_footer', function () {
             return html2canvasPromise;
         }
 
-        // Capture the visible viewport with html2canvas (no x/y cropping — that
-        // doesn't work reliably on Elementor-style layouts with nested wrappers
-        // and transforms), then crop client-side around the click point. The
-        // click point is always visible in the viewport at click time, so this
-        // is the most reliable way to get an accurate screenshot.
-        function captureViewportAndCrop(clientX, clientY, size, screenshotId) {
+        // Maximum width of a saved screenshot; wider captures are downscaled to
+        // keep the postMessage/upload payload reasonable.
+        var MAX_SHOT_WIDTH = 600;
+
+        // Walk up from the clicked/selected element to find a reasonably-sized
+        // container (a card, section, widget) so the screenshot shows meaningful
+        // context rather than a one-word fragment. Returns null for bare
+        // body/html so the caller can fall back to a viewport-region capture.
+        function resolveCaptureTarget(el) {
+            if (!el || el.nodeType !== 1) return null;
+            if (el === document.documentElement || el === document.body) return null;
+            var node = el;
+            for (var i = 0; i < 8 && node && node !== document.body; i++) {
+                var r = node.getBoundingClientRect();
+                if (r.width >= 40 && r.height >= 24 &&
+                    r.height <= window.innerHeight * 0.9 &&
+                    r.width <= window.innerWidth + 4) {
+                    return node;
+                }
+                node = node.parentElement;
+            }
+            return el;
+        }
+
+        function isOpaqueColor(c) {
+            return c && c !== 'transparent' && !/rgba\(\s*0,\s*0,\s*0,\s*0\s*\)/.test(c);
+        }
+
+        // Nearest ancestor background color. Used as the html2canvas
+        // backgroundColor so dark-themed elements (white text on a transparent
+        // background) don't render as white-on-white when captured.
+        function effectiveBgColor(el) {
+            var node = el;
+            while (node && node !== document.documentElement) {
+                var bg = window.getComputedStyle(node).backgroundColor;
+                if (isOpaqueColor(bg)) return bg;
+                node = node.parentElement;
+            }
+            return pageBgColor();
+        }
+
+        function pageBgColor() {
+            var b = window.getComputedStyle(document.body).backgroundColor;
+            if (isOpaqueColor(b)) return b;
+            var h = window.getComputedStyle(document.documentElement).backgroundColor;
+            if (isOpaqueColor(h)) return h;
+            return '#ffffff';
+        }
+
+        function canvasToDataUrl(canvas) {
+            if (canvas.width <= MAX_SHOT_WIDTH) return canvas.toDataURL('image/png');
+            var ratio = MAX_SHOT_WIDTH / canvas.width;
+            var c2 = document.createElement('canvas');
+            c2.width = MAX_SHOT_WIDTH;
+            c2.height = Math.round(canvas.height * ratio);
+            c2.getContext('2d').drawImage(canvas, 0, 0, c2.width, c2.height);
+            return c2.toDataURL('image/png');
+        }
+
+        // Screenshot exactly the element the user clicked/selected. Capturing the
+        // DOM element directly — rather than rendering the whole document and
+        // cropping by (x, y) — means the image always matches what was clicked.
+        // The old crop approach never mapped document coords to canvas pixels
+        // reliably on Elementor-style layouts (nested wrappers, transforms,
+        // fixed/sticky headers), which is why screenshots didn't match the pin.
+        // For clicks on bare page background we capture the visible viewport.
+        function captureElement(rawEl, screenshotId) {
             return loadHtml2Canvas().then(function(html2canvas) {
+                var target = resolveCaptureTarget(rawEl);
+                if (target) {
+                    return html2canvas(target, {
+                        useCORS: true,
+                        allowTaint: true,
+                        logging: false,
+                        backgroundColor: effectiveBgColor(target),
+                        scale: 1,
+                        foreignObjectRendering: false
+                    });
+                }
+                // Fallback: capture only the visible viewport region.
                 return html2canvas(document.documentElement, {
                     useCORS: true,
                     allowTaint: true,
                     logging: false,
-                    backgroundColor: '#ffffff',
+                    backgroundColor: pageBgColor(),
                     scale: 1,
-                    foreignObjectRendering: false
+                    foreignObjectRendering: false,
+                    x: getScrollX(),
+                    y: getScrollY(),
+                    width: window.innerWidth,
+                    height: window.innerHeight,
+                    scrollX: 0,
+                    scrollY: 0,
+                    windowWidth: document.documentElement.scrollWidth,
+                    windowHeight: document.documentElement.scrollHeight
                 });
-            }).then(function(viewportCanvas) {
-                // viewportCanvas covers the WHOLE document at scale 1.
-                // The click happened at (clientX, clientY) in viewport coords,
-                // which translate to (clientX + scrollX, clientY + scrollY) in
-                // document coords. html2canvas captures the document so we need
-                // to use document coords for cropping.
-                var docX = clientX + getScrollX();
-                var docY = clientY + getScrollY();
-
-                var sx = Math.max(0, Math.min(viewportCanvas.width - size, Math.round(docX - size / 2)));
-                var sy = Math.max(0, Math.min(viewportCanvas.height - size, Math.round(docY - size / 2)));
-                // If the document is smaller than the requested size on either axis
-                var actualW = Math.min(size, viewportCanvas.width);
-                var actualH = Math.min(size, viewportCanvas.height);
-
-                var cropCanvas = document.createElement('canvas');
-                cropCanvas.width = actualW;
-                cropCanvas.height = actualH;
-                var ctx = cropCanvas.getContext('2d');
-                ctx.fillStyle = '#ffffff';
-                ctx.fillRect(0, 0, actualW, actualH);
-                ctx.drawImage(viewportCanvas, sx, sy, actualW, actualH, 0, 0, actualW, actualH);
-
-                return cropCanvas.toDataURL('image/png');
-            }).then(function(dataUrl) {
+            }).then(function(canvas) {
                 window.parent.postMessage({
                     type: 'markup-click-screenshot',
                     screenshotId: screenshotId,
-                    dataUrl: dataUrl
+                    dataUrl: canvasToDataUrl(canvas)
                 }, '*');
             }).catch(function(err) {
                 window.parent.postMessage({
@@ -427,8 +484,10 @@ add_action('wp_footer', function () {
                 var screenshotId = null;
                 if (commentMode) {
                     screenshotId = newScreenshotId();
-                    // Capture around the center of the selection (viewport coords)
-                    captureViewportAndCrop(rect.left + rect.width / 2, rect.top + rect.height / 2, 400, screenshotId);
+                    // Capture the element that contains the selected text.
+                    var selEl = range.commonAncestorContainer;
+                    if (selEl && selEl.nodeType !== 1) selEl = selEl.parentElement;
+                    captureElement(selEl, screenshotId);
                 }
                 window.parent.postMessage({
                     type: 'markup-text-selected',
@@ -461,10 +520,8 @@ add_action('wp_footer', function () {
             var screenshotId = null;
             if (commentMode) {
                 screenshotId = newScreenshotId();
-                // Kick off screenshot capture asynchronously — uses viewport
-                // coords (clientX/Y) which are guaranteed correct since the
-                // user just clicked there.
-                captureViewportAndCrop(e.clientX, e.clientY, 400, screenshotId);
+                // Capture the element the user actually clicked on.
+                captureElement(e.target, screenshotId);
             }
             window.parent.postMessage({
                 type: 'markup-click',
