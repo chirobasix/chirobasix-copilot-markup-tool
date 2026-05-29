@@ -3,7 +3,7 @@
  * Plugin Name: ChiroBasix Copilot - MarkUp Bridge
  * Description: Allows copilot.chirobasix.com to embed this site in an iframe and provides
  *              a postMessage bridge for the MarkUp feedback tool (scroll tracking, navigation).
- * Version: 2.5.0
+ * Version: 2.6.0
  * Author: ChiroBasix
  * GitHub Repo: chirobasix/chirobasix-copilot-markup-tool
  */
@@ -330,37 +330,18 @@ add_action('wp_footer', function () {
             return html2canvasPromise;
         }
 
-        // Maximum width of a saved screenshot; wider captures are downscaled to
-        // keep the postMessage/upload payload reasonable.
-        var MAX_SHOT_WIDTH = 600;
-
-        // Walk up from the clicked/selected element to find a reasonably-sized
-        // container (a card, section, widget) so the screenshot shows meaningful
-        // context rather than a one-word fragment. Returns null for bare
-        // body/html so the caller can fall back to a viewport-region capture.
-        function resolveCaptureTarget(el) {
-            if (!el || el.nodeType !== 1) return null;
-            if (el === document.documentElement || el === document.body) return null;
-            var node = el;
-            for (var i = 0; i < 8 && node && node !== document.body; i++) {
-                var r = node.getBoundingClientRect();
-                if (r.width >= 40 && r.height >= 24 &&
-                    r.height <= window.innerHeight * 0.9 &&
-                    r.width <= window.innerWidth + 4) {
-                    return node;
-                }
-                node = node.parentElement;
-            }
-            return el;
-        }
+        // Size of the captured area (document px), centered on the click. We
+        // capture a region rather than only the clicked element so the team
+        // sees the click in context, not a tight crop of a single widget.
+        var SHOT_BOX = 700;
 
         function isOpaqueColor(c) {
             return c && c !== 'transparent' && !/rgba\(\s*0,\s*0,\s*0,\s*0\s*\)/.test(c);
         }
 
-        // Nearest ancestor background color. Used as the html2canvas
-        // backgroundColor so dark-themed elements (white text on a transparent
-        // background) don't render as white-on-white when captured.
+        // Nearest ancestor background color, used as the html2canvas fill so
+        // empty gaps in a capture match the section behind the content (e.g. a
+        // dark-themed section) instead of defaulting to white.
         function effectiveBgColor(el) {
             var node = el;
             while (node && node !== document.documentElement) {
@@ -379,58 +360,45 @@ add_action('wp_footer', function () {
             return '#ffffff';
         }
 
-        function canvasToDataUrl(canvas) {
-            if (canvas.width <= MAX_SHOT_WIDTH) return canvas.toDataURL('image/png');
-            var ratio = MAX_SHOT_WIDTH / canvas.width;
-            var c2 = document.createElement('canvas');
-            c2.width = MAX_SHOT_WIDTH;
-            c2.height = Math.round(canvas.height * ratio);
-            c2.getContext('2d').drawImage(canvas, 0, 0, c2.width, c2.height);
-            return c2.toDataURL('image/png');
-        }
-
-        // Screenshot exactly the element the user clicked/selected. Capturing the
-        // DOM element directly — rather than rendering the whole document and
-        // cropping by (x, y) — means the image always matches what was clicked.
-        // The old crop approach never mapped document coords to canvas pixels
-        // reliably on Elementor-style layouts (nested wrappers, transforms,
-        // fixed/sticky headers), which is why screenshots didn't match the pin.
-        // For clicks on bare page background we capture the visible viewport.
-        function captureElement(rawEl, screenshotId) {
+        // Screenshot a SHOT_BOX×SHOT_BOX region of the document centered on the
+        // click/selection. The page is rendered un-scrolled at its full size
+        // (windowWidth/Height = scroll size, scrollX/Y = 0) and cropped by
+        // document pixels (x, y). That is what makes the capture accurate: with
+        // these options html2canvas lays the page out once at the top, so
+        // document coordinates map 1:1 to the rendered canvas and fixed/sticky
+        // headers don't bleed into mid-page captures. (The old approach rendered
+        // at the current scroll offset and cropped a mis-mapped canvas — which
+        // is why screenshots didn't match the click.) contextEl only sets the
+        // fill color used for empty gaps.
+        function captureRegion(docCenterX, docCenterY, contextEl, screenshotId) {
             return loadHtml2Canvas().then(function(html2canvas) {
-                var target = resolveCaptureTarget(rawEl);
-                if (target) {
-                    return html2canvas(target, {
-                        useCORS: true,
-                        allowTaint: true,
-                        logging: false,
-                        backgroundColor: effectiveBgColor(target),
-                        scale: 1,
-                        foreignObjectRendering: false
-                    });
-                }
-                // Fallback: capture only the visible viewport region.
+                var docW = document.documentElement.scrollWidth;
+                var docH = document.documentElement.scrollHeight;
+                var boxW = Math.min(SHOT_BOX, docW);
+                var boxH = Math.min(SHOT_BOX, docH);
+                var x = Math.max(0, Math.min(docW - boxW, Math.round(docCenterX - boxW / 2)));
+                var y = Math.max(0, Math.min(docH - boxH, Math.round(docCenterY - boxH / 2)));
                 return html2canvas(document.documentElement, {
                     useCORS: true,
                     allowTaint: true,
                     logging: false,
-                    backgroundColor: pageBgColor(),
+                    backgroundColor: contextEl ? effectiveBgColor(contextEl) : pageBgColor(),
                     scale: 1,
                     foreignObjectRendering: false,
-                    x: getScrollX(),
-                    y: getScrollY(),
-                    width: window.innerWidth,
-                    height: window.innerHeight,
+                    x: x,
+                    y: y,
+                    width: boxW,
+                    height: boxH,
                     scrollX: 0,
                     scrollY: 0,
-                    windowWidth: document.documentElement.scrollWidth,
-                    windowHeight: document.documentElement.scrollHeight
+                    windowWidth: docW,
+                    windowHeight: docH
                 });
             }).then(function(canvas) {
                 window.parent.postMessage({
                     type: 'markup-click-screenshot',
                     screenshotId: screenshotId,
-                    dataUrl: canvasToDataUrl(canvas)
+                    dataUrl: canvas.toDataURL('image/png')
                 }, '*');
             }).catch(function(err) {
                 window.parent.postMessage({
@@ -484,10 +452,15 @@ add_action('wp_footer', function () {
                 var screenshotId = null;
                 if (commentMode) {
                     screenshotId = newScreenshotId();
-                    // Capture the element that contains the selected text.
+                    // Capture a region centered on the selected text.
                     var selEl = range.commonAncestorContainer;
                     if (selEl && selEl.nodeType !== 1) selEl = selEl.parentElement;
-                    captureElement(selEl, screenshotId);
+                    captureRegion(
+                        rect.left + getScrollX() + rect.width / 2,
+                        rect.top + getScrollY() + rect.height / 2,
+                        selEl,
+                        screenshotId
+                    );
                 }
                 window.parent.postMessage({
                     type: 'markup-text-selected',
@@ -520,8 +493,8 @@ add_action('wp_footer', function () {
             var screenshotId = null;
             if (commentMode) {
                 screenshotId = newScreenshotId();
-                // Capture the element the user actually clicked on.
-                captureElement(e.target, screenshotId);
+                // Capture a region centered on the click.
+                captureRegion(e.pageX, e.pageY, e.target, screenshotId);
             }
             window.parent.postMessage({
                 type: 'markup-click',
