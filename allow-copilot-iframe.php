@@ -3,7 +3,7 @@
  * Plugin Name: ChiroBasix Copilot - MarkUp Bridge
  * Description: Allows copilot.chirobasix.com to embed this site in an iframe and provides
  *              a postMessage bridge for the MarkUp feedback tool (scroll tracking, navigation).
- * Version: 2.6.0
+ * Version: 2.7.0
  * Author: ChiroBasix
  * GitHub Repo: chirobasix/chirobasix-copilot-markup-tool
  */
@@ -333,7 +333,7 @@ add_action('wp_footer', function () {
         // Size of the captured area (document px), centered on the click. We
         // capture a region rather than only the clicked element so the team
         // sees the click in context, not a tight crop of a single widget.
-        var SHOT_BOX = 700;
+        var SHOT_BOX = 800;
 
         function isOpaqueColor(c) {
             return c && c !== 'transparent' && !/rgba\(\s*0,\s*0,\s*0,\s*0\s*\)/.test(c);
